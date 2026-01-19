@@ -16,16 +16,3 @@
     "OPENROUTER_API_KEY": "@openrouter_api_key"
   }
 }
-```
-
-### **File 5: `backend/.gitignore`**
-```
-__pycache__/
-*.py[cod]
-*$py.class
-.env
-.venv
-env/
-venv/
-.vercel
-*.log
