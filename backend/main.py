@@ -1,20 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict
+from typing import Optional, Dict
 from datetime import datetime
 import os
 import logging
 import httpx
 from dotenv import load_dotenv
-def question_agent(messages):
-    response = client.chat.completions.create(
-        model="openai/gpt-4o-mini",
-        messages=messages,
-        temperature=0.4,
-    )
-    return response.choices[0].message.content
-
 
 # ======================================================
 # LOAD ENV
@@ -57,13 +49,10 @@ class DecisionInput(BaseModel):
     decision: str = Field(..., min_length=10, max_length=1000)
     conversation_id: str
 
-from pydantic import BaseModel
 
 class Answer(BaseModel):
     conversation_id: str
     answer: str
-    question_index: int
-
 
 
 class QuestionResponse(BaseModel):
@@ -73,10 +62,12 @@ class QuestionResponse(BaseModel):
 
 
 # ======================================================
-# STORAGE (IN-MEMORY)
+# IN-MEMORY STORAGE
 # ======================================================
 
 conversations: Dict[str, Dict] = {}
+
+MAX_QUESTIONS = 4
 
 # ======================================================
 # HELPERS
@@ -88,15 +79,12 @@ def generate_question_hints(question: str) -> str:
         return "What’s driving this decision?"
     if "risk" in q:
         return "What worries you most?"
-    if "time" in q:
-        return "Is this urgent or flexible?"
+    if "financial" in q:
+        return "Think in months of safety."
     return "Be honest and specific."
 
 
 async def ask_llm(prompt: str) -> str:
-    """
-    Calls OpenRouter / OpenAI-compatible API safely.
-    """
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
@@ -110,7 +98,7 @@ async def ask_llm(prompt: str) -> str:
             {"role": "system", "content": "You are an expert decision-making coach."},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.7,
+        "temperature": 0.6,
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -145,7 +133,6 @@ async def start_decision(payload: DecisionInput):
         "decision": payload.decision,
         "questions": [],
         "answers": [],
-        "status": "active",
     }
 
     prompt = f"""
@@ -153,15 +140,14 @@ The user is deciding:
 
 "{payload.decision}"
 
-Ask ONE concise, insightful clarifying question.
+Ask ONE concise, insightful first clarifying question.
 Return ONLY the question text.
 """
 
     try:
         question = await ask_llm(prompt)
-    except Exception as e:
-        logger.exception(e)
-        question = "Why is this decision important to you?"
+    except Exception:
+        question = "What matters most to you in this decision?"
 
     conversations[payload.conversation_id]["questions"].append(question)
 
@@ -170,8 +156,60 @@ Return ONLY the question text.
         hint=generate_question_hints(question),
     )
 
+
+@app.post("/api/decision/answer", response_model=QuestionResponse)
+async def answer_decision(payload: Answer):
+    convo = conversations.get(payload.conversation_id)
+
+    if not convo:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    convo["answers"].append(payload.answer)
+    step = len(convo["answers"])
+
+    # 🔹 If enough info → FINAL ANSWER
+    if step >= MAX_QUESTIONS:
+        summary_prompt = f"""
+Decision: {convo['decision']}
+
+User answers:
+{list(zip(convo['questions'], convo['answers']))}
+
+Give a clear recommendation with reasoning.
+"""
+
+        final_answer = await ask_llm(summary_prompt)
+
+        return QuestionResponse(
+            question=final_answer,
+            is_final=True
+        )
+
+    # 🔹 Ask next question
+    prompt = f"""
+Decision: {convo['decision']}
+
+Previous Q&A:
+{list(zip(convo['questions'], convo['answers']))}
+
+Ask the NEXT most important clarifying question.
+Return ONLY the question.
+"""
+
+    try:
+        question = await ask_llm(prompt)
+    except Exception:
+        question = "What else should you consider before deciding?"
+
+    convo["questions"].append(question)
+
+    return QuestionResponse(
+        question=question,
+        hint=generate_question_hints(question)
+    )
+
 # ======================================================
-# ENTRYPOINT (LOCAL ONLY)
+# LOCAL ENTRYPOINT
 # ======================================================
 
 if __name__ == "__main__":
@@ -181,95 +219,4 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=int(os.getenv("PORT", 8000)),
         reload=True,
-    )
-@app.post("/api/decision/answer", response_model=QuestionResponse)
-async def answer_question(payload: Answer):
-    convo = conversations.get(payload.conversation_id)
-
-    if not convo:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    convo["answers"].append(payload.answer)
-
-    # STOP after 3 answers
-    if len(convo["answers"]) >= 3:
-        convo["status"] = "completed"
-        return QuestionResponse(
-            question="Thanks. I have enough information to give you a recommendation.",
-            is_final=True
-        )
-
-    prompt = f"""
-Decision: {convo['decision']}
-
-Previous Q&A:
-{list(zip(convo['questions'], convo['answers']))}
-
-Ask the NEXT most important clarifying question.
-Return ONLY the question.
-"""
-
-    try:
-        result = await question_agent.run(prompt)
-        question = result.data.strip()
-    except Exception as e:
-        logger.error(e)
-        question = "What else should I consider before deciding?"
-
-    convo["questions"].append(question)
-
-    return QuestionResponse(
-        question=question,
-        hint=generate_question_hints(question)
-    )
-@app.post("/api/decision/answer")
-async def answer_question(payload: Answer):
-    convo = conversations.get(payload.conversation_id)
-    operation_id="decision_answer"
-    if not convo:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    convo["answers"].append(payload.answer)
-
-    messages = convo["messages"] + [
-        {"role": "user", "content": payload.answer}
-    ]
-
-    next_question = question_agent(messages)
-
-    convo["messages"].append(
-        {"role": "assistant", "content": next_question}
-    )
-
-    is_final = len(convo["answers"]) >= MAX_QUESTIONS
-
-    return {
-        "question": next_question,
-        "is_final": is_final,
-        "hint": None if is_final else "Answer honestly."
-    }
-
-
-    prompt = f"""
-Decision: {convo['decision']}
-
-Previous Q&A:
-{list(zip(convo['questions'], convo['answers']))}
-
-Ask the NEXT most important clarifying question.
-Return ONLY the question.
-"""
-
-    try:
-        result = await question_agent.run(prompt)
-        question = result.data.strip()
-    except Exception as e:
-        logger.error(e)
-        question = "What else should I consider before deciding?"
-
-    convo["questions"].append(question)
-
-    return QuestionResponse(
-        question=question,
-        hint=generate_question_hints(question)
     )
