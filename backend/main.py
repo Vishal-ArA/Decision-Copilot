@@ -166,3 +166,83 @@ if __name__ == "__main__":
         port=int(os.getenv("PORT", 8000)),
         reload=True,
     )
+@app.post("/api/decision/answer", response_model=QuestionResponse)
+async def answer_question(payload: Answer):
+    convo = conversations.get(payload.conversation_id)
+
+    if not convo:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    convo["answers"].append(payload.answer)
+
+    # STOP after 3 answers
+    if len(convo["answers"]) >= 3:
+        convo["status"] = "completed"
+        return QuestionResponse(
+            question="Thanks. I have enough information to give you a recommendation.",
+            is_final=True
+        )
+
+    prompt = f"""
+Decision: {convo['decision']}
+
+Previous Q&A:
+{list(zip(convo['questions'], convo['answers']))}
+
+Ask the NEXT most important clarifying question.
+Return ONLY the question.
+"""
+
+    try:
+        result = await question_agent.run(prompt)
+        question = result.data.strip()
+    except Exception as e:
+        logger.error(e)
+        question = "What else should I consider before deciding?"
+
+    convo["questions"].append(question)
+
+    return QuestionResponse(
+        question=question,
+        hint=generate_question_hints(question)
+    )
+@app.post("/api/decision/answer", response_model=QuestionResponse)
+async def answer_question(payload: Answer):
+    convo = conversations.get(payload.conversation_id)
+
+    if not convo:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    convo["answers"].append(payload.answer)
+
+    # STOP after 3 answers
+    if len(convo["answers"]) >= 3:
+        convo["status"] = "completed"
+        return QuestionResponse(
+            question="Thanks. I have enough information to give you a recommendation.",
+            is_final=True
+        )
+
+    prompt = f"""
+Decision: {convo['decision']}
+
+Previous Q&A:
+{list(zip(convo['questions'], convo['answers']))}
+
+Ask the NEXT most important clarifying question.
+Return ONLY the question.
+"""
+
+    try:
+        result = await question_agent.run(prompt)
+        question = result.data.strip()
+    except Exception as e:
+        logger.error(e)
+        question = "What else should I consider before deciding?"
+
+    convo["questions"].append(question)
+
+    return QuestionResponse(
+        question=question,
+        hint=generate_question_hints(question)
+    )
