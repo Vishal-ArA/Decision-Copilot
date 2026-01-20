@@ -7,6 +7,14 @@ import os
 import logging
 import httpx
 from dotenv import load_dotenv
+def question_agent(messages):
+    response = client.chat.completions.create(
+        model="openai/gpt-4o-mini",
+        messages=messages,
+        temperature=0.4,
+    )
+    return response.choices[0].message.content
+
 
 # ======================================================
 # LOAD ENV
@@ -214,22 +222,33 @@ Return ONLY the question.
         question=question,
         hint=generate_question_hints(question)
     )
-@app.post("/api/decision/answer", response_model=QuestionResponse)
+@app.post("/api/decision/answer")
 async def answer_question(payload: Answer):
     convo = conversations.get(payload.conversation_id)
-
+    operation_id="decision_answer"
     if not convo:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     convo["answers"].append(payload.answer)
 
-    # STOP after 3 answers
-    if len(convo["answers"]) >= 3:
-        convo["status"] = "completed"
-        return QuestionResponse(
-            question="Thanks. I have enough information to give you a recommendation.",
-            is_final=True
-        )
+    messages = convo["messages"] + [
+        {"role": "user", "content": payload.answer}
+    ]
+
+    next_question = question_agent(messages)
+
+    convo["messages"].append(
+        {"role": "assistant", "content": next_question}
+    )
+
+    is_final = len(convo["answers"]) >= MAX_QUESTIONS
+
+    return {
+        "question": next_question,
+        "is_final": is_final,
+        "hint": None if is_final else "Answer honestly."
+    }
+
 
     prompt = f"""
 Decision: {convo['decision']}
