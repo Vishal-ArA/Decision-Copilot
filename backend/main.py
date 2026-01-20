@@ -49,6 +49,14 @@ class DecisionInput(BaseModel):
     decision: str = Field(..., min_length=10, max_length=1000)
     conversation_id: str
 
+from pydantic import BaseModel
+
+class Answer(BaseModel):
+    conversation_id: str
+    answer: str
+    question_index: int
+
+
 
 class QuestionResponse(BaseModel):
     question: str
