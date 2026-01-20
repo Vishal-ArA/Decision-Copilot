@@ -4,24 +4,27 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
 from datetime import datetime
 import os
-import json
 import logging
-
+import httpx
 from dotenv import load_dotenv
-from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIModel
 
 # ======================================================
-# LOAD ENV (CRITICAL)
+# LOAD ENV
 # ======================================================
 
-load_dotenv()  # <-- THIS FIXES YOUR ERROR
+load_dotenv()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://openrouter.ai/api/v1")
+
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY is not set")
 
 # ======================================================
 # LOGGING
 # ======================================================
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ======================================================
@@ -53,94 +56,59 @@ class QuestionResponse(BaseModel):
     hint: Optional[str] = None
 
 
-class Answer(BaseModel):
-    conversation_id: str
-    answer: str
-    question_index: int
-
-
-class CriteriaScore(BaseModel):
-    name: str
-    weight: float
-    description: str
-
-
-class OptionScore(BaseModel):
-    option: str
-    scores: List[int]
-    total_score: float
-    strengths: List[str] = []
-    weaknesses: List[str] = []
-
-
-class Analysis(BaseModel):
-    decision: str
-    options: List[str]
-    criteria: List[CriteriaScore]
-    scores: List[OptionScore]
-    recommendation: str
-    confidence: int
-    reasoning: List[str]
-    what_would_change: List[str]
-    considerations: List[str]
-    timeline: str = ""
-
 # ======================================================
-# STORAGE
+# STORAGE (IN-MEMORY)
 # ======================================================
 
 conversations: Dict[str, Dict] = {}
-
-# ======================================================
-# AI MODEL (OpenRouter)
-# ======================================================
-
-# REQUIRED env vars:
-# OPENAI_API_KEY=sk-or-xxxx
-# OPENAI_API_BASE=https://openrouter.ai/api/v1
-
-model = OpenAIModel("openai/gpt-4o-mini")
-
-# ======================================================
-# AI AGENTS
-# ======================================================
-
-question_agent = Agent(
-    model=model,
-    system_prompt="""
-You are an expert decision-making coach.
-Ask ONE concise, insightful clarifying question.
-Return ONLY the question text.
-""".strip()
-)
-
-analysis_agent = Agent(
-    model=model,
-    system_prompt="""
-You are a world-class decision analyst.
-Use MCDA, risk analysis, and long-term reasoning.
-Return structured, actionable recommendations.
-""".strip()
-)
 
 # ======================================================
 # HELPERS
 # ======================================================
 
 def generate_question_hints(question: str) -> str:
-    if "why" in question.lower():
+    q = question.lower()
+    if "why" in q:
         return "What’s driving this decision?"
-    if "risk" in question.lower():
+    if "risk" in q:
         return "What worries you most?"
-    if "time" in question.lower():
+    if "time" in q:
         return "Is this urgent or flexible?"
     return "Be honest and specific."
 
-def confidence_score(scores: List[OptionScore]) -> int:
-    if len(scores) < 2:
-        return 75
-    diff = scores[0].total_score - scores[1].total_score
-    return max(60, min(95, int(70 + diff)))
+
+async def ask_llm(prompt: str) -> str:
+    """
+    Calls OpenRouter / OpenAI-compatible API safely.
+    """
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://decision-copilot",
+        "X-Title": "Decision Copilot",
+    }
+
+    payload = {
+        "model": "openai/gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": "You are an expert decision-making coach."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.7,
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            f"{OPENAI_API_BASE}/chat/completions",
+            headers=headers,
+            json=payload,
+        )
+
+        if r.status_code != 200:
+            logger.error(r.text)
+            raise HTTPException(status_code=500, detail="LLM request failed")
+
+        return r.json()["choices"][0]["message"]["content"].strip()
 
 # ======================================================
 # ROUTES
@@ -150,10 +118,10 @@ def confidence_score(scores: List[OptionScore]) -> int:
 async def health():
     return {
         "status": "healthy",
-        "openai_api_key_loaded": bool(os.getenv("OPENAI_API_KEY")),
-        "openai_api_base": os.getenv("OPENAI_API_BASE"),
-        "timestamp": datetime.now().isoformat()
+        "openai_key_loaded": True,
+        "timestamp": datetime.utcnow().isoformat(),
     }
+
 
 @app.post("/api/decision/start", response_model=QuestionResponse)
 async def start_decision(payload: DecisionInput):
@@ -161,7 +129,7 @@ async def start_decision(payload: DecisionInput):
         "decision": payload.decision,
         "questions": [],
         "answers": [],
-        "status": "active"
+        "status": "active",
     }
 
     prompt = f"""
@@ -169,40 +137,32 @@ The user is deciding:
 
 "{payload.decision}"
 
-Ask the MOST important first question.
-Return ONLY the question.
+Ask ONE concise, insightful clarifying question.
+Return ONLY the question text.
 """
 
     try:
-        result = await question_agent.run(prompt)
-        question = result.data.strip()
+        question = await ask_llm(prompt)
     except Exception as e:
-        logger.error(e)
+        logger.exception(e)
         question = "Why is this decision important to you?"
 
     conversations[payload.conversation_id]["questions"].append(question)
 
     return QuestionResponse(
         question=question,
-        hint=generate_question_hints(question)
+        hint=generate_question_hints(question),
     )
 
 # ======================================================
-# ENTRYPOINT
+# ENTRYPOINT (LOCAL ONLY)
 # ======================================================
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", 8000)),
-        log_level="info"
-    )
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=int(os.getenv("PORT", 8000))
+        port=int(os.getenv("PORT", 8000)),
+        reload=True,
     )
