@@ -1,62 +1,103 @@
 import React, { useState, useEffect, useRef } from "react";
-import {
-  Brain,
-  Send,
-  Loader2,
-  ChevronRight,
-} from "lucide-react";
+import { Brain, Send, Loader2, ChevronRight } from "lucide-react";
+import { DecisionAPI } from "./api/decision";
 
 const DecisionCopilot = () => {
-  const [stage, setStage] = useState("welcome"); // welcome | clarifying
+  const [stage, setStage] = useState("welcome");
   const [decision, setDecision] = useState("");
   const [messages, setMessages] = useState([]);
-  const [currentQuestion, setCurrentQuestion] = useState("");
+  const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+
+  const conversationIdRef = useRef(crypto.randomUUID());
+  const questionIndexRef = useRef(0);
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, isLoading]);
 
-  // ---------------- HANDLERS ----------------
-  const startDecision = () => {
+  // ================= START DECISION =================
+  const startDecision = async () => {
     if (!decision.trim()) return;
 
-    setMessages([
-      {
-        role: "assistant",
-        content: `Great! Let’s think through this together:\n\n"${decision}"\n\nFirst question: what matters most to you here?`,
-        timestamp: new Date().toISOString(),
-      },
-    ]);
-
+    setIsLoading(true);
     setStage("clarifying");
+
+    try {
+      const res = await DecisionAPI.startDecision(
+        decision,
+        conversationIdRef.current
+      );
+
+      setMessages([
+        {
+          role: "assistant",
+          content: res.question,
+          timestamp: new Date().toISOString(),
+        },
+      ]);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to start decision");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const handleAnswer = () => {
-    if (!currentQuestion.trim()) return;
+  // ================= SEND ANSWER =================
+  const handleSend = async () => {
+    if (!input.trim()) return;
+
+    const userAnswer = input;
+    setInput("");
 
     setMessages((prev) => [
       ...prev,
       {
         role: "user",
-        content: currentQuestion,
-        timestamp: new Date().toISOString(),
-      },
-      {
-        role: "assistant",
-        content: "Thanks. Based on that, what’s your biggest concern or risk?",
+        content: userAnswer,
         timestamp: new Date().toISOString(),
       },
     ]);
 
-    setCurrentQuestion("");
+    setIsLoading(true);
+
+    try {
+      const res = await DecisionAPI.submitAnswer(
+        conversationIdRef.current,
+        userAnswer,
+        questionIndexRef.current
+      );
+
+      questionIndexRef.current += 1;
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: res.question,
+          timestamp: new Date().toISOString(),
+        },
+      ]);
+    } catch (err) {
+      console.error(err);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "Something went wrong. Please try again.",
+          timestamp: new Date().toISOString(),
+        },
+      ]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  // ---------------- UI ----------------
+  // ================= UI =================
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 flex items-center justify-center px-4">
-      {/* ================= WELCOME ================= */}
       {stage === "welcome" && (
         <div className="bg-white max-w-xl w-full p-10 rounded-2xl shadow-xl border border-gray-200 text-center">
           <div className="w-14 h-14 bg-indigo-600 rounded-xl flex items-center justify-center mx-auto mb-4">
@@ -75,12 +116,12 @@ const DecisionCopilot = () => {
             value={decision}
             onChange={(e) => setDecision(e.target.value)}
             placeholder="Describe your decision here..."
-            className="w-full h-32 p-4 border-2 border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 resize-none mb-6"
+            className="w-full h-32 p-4 border-2 border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 resize-none mb-6"
           />
 
           <button
             onClick={startDecision}
-            className="w-full px-6 py-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-semibold rounded-xl hover:from-indigo-700 hover:to-purple-700 transition-all flex items-center justify-center gap-2"
+            className="w-full px-6 py-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-semibold rounded-xl flex items-center justify-center gap-2"
           >
             Start Analysis
             <ChevronRight className="w-5 h-5" />
@@ -88,7 +129,6 @@ const DecisionCopilot = () => {
         </div>
       )}
 
-      {/* ================= CHAT ================= */}
       {stage === "clarifying" && (
         <div className="bg-white max-w-2xl w-full rounded-2xl shadow-xl border border-gray-200 flex flex-col h-[80vh]">
           <div className="bg-gradient-to-r from-indigo-600 to-purple-600 px-6 py-4 text-white font-bold">
@@ -112,9 +152,6 @@ const DecisionCopilot = () => {
                 >
                   {msg.content}
                 </div>
-                <div className="text-xs text-gray-400 mt-1">
-                  {new Date(msg.timestamp).toLocaleTimeString()}
-                </div>
               </div>
             ))}
 
@@ -130,15 +167,15 @@ const DecisionCopilot = () => {
 
           <div className="border-t border-gray-200 p-4 flex gap-3">
             <input
-              value={currentQuestion}
-              onChange={(e) => setCurrentQuestion(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAnswer()}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSend()}
               placeholder="Type your answer..."
-              className="flex-1 px-4 py-3 border-2 border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500"
+              className="flex-1 px-4 py-3 border-2 border-gray-300 rounded-xl"
             />
             <button
-              onClick={handleAnswer}
-              className="px-6 py-3 bg-indigo-600 text-white rounded-xl flex items-center gap-2"
+              onClick={handleSend}
+              className="px-6 py-3 bg-indigo-600 text-white rounded-xl"
             >
               <Send className="w-5 h-5" />
             </button>
